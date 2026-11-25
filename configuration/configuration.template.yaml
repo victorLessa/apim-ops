@@ -1,0 +1,8 @@
+# Override por ambiente; os valores vêm das variáveis do GitHub Environment.
+apimServiceName: "${API_MANAGEMENT_SERVICE_NAME}"
+
+backends:
+  # TODO: ajustar "pedidos" para o nome do backend definido em apimartifacts/.
+  - name: pedidos
+    properties:
+      url: "${BACKEND_PEDIDOS_URL}"

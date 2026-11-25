@@ -1,0 +1,178 @@
+name: Publicar APIM
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - apimartifacts/**
+      - configuration/**
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Ambiente de destino
+        required: true
+        type: choice
+        options:
+          - des
+          - prd
+      mode:
+        description: Incremental publica o commit atual; full publica todos os artefatos
+        required: true
+        type: choice
+        default: full
+        options:
+          - incremental
+          - full
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish-des:
+    if: ${{ github.event_name == 'push' || github.event.inputs.environment == 'des' }}
+    runs-on: ubuntu-latest
+    environment: des
+    concurrency:
+      group: apim-publish-des
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Login Azure por OIDC
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Gerar configuração DES
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          AZURE_RESOURCE_GROUP_NAME: ${{ vars.AZURE_RESOURCE_GROUP_NAME }}
+          API_MANAGEMENT_SERVICE_NAME: ${{ vars.API_MANAGEMENT_SERVICE_NAME }}
+          BACKEND_PEDIDOS_URL: ${{ vars.BACKEND_PEDIDOS_URL }}
+        run: |
+          set -euo pipefail
+          # Falha cedo se faltar uma variável obrigatória do Environment.
+          for variable in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID AZURE_RESOURCE_GROUP_NAME API_MANAGEMENT_SERVICE_NAME BACKEND_PEDIDOS_URL; do
+            if [[ -z "${!variable:-}" ]]; then
+              echo "::error::A variável $variable é obrigatória no Environment des."
+              exit 1
+            fi
+          done
+          # Garante que envsubst esteja disponível no runner.
+          if ! command -v envsubst >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y gettext-base
+          fi
+          # Renderiza somente os placeholders declarados no template.
+          envsubst '${API_MANAGEMENT_SERVICE_NAME} ${BACKEND_PEDIDOS_URL}' < configuration/configuration.template.yaml > configuration.des.yaml
+
+      - name: Baixar Publisher APIOps v7.0.4
+        run: |
+          set -euo pipefail
+          # Baixa a release oficial e valida seu SHA-256 fixado.
+          curl --fail --location --silent --show-error \
+            https://github.com/Azure/apiops/releases/download/v7.0.4/publisher-linux-x64.zip \
+            --output "$RUNNER_TEMP/publisher-linux-x64.zip"
+          echo '2c1f32d18e8b66271df1dd184a3b45a0ff5cfe4149beb178f017a7db03a88fe0  '"$RUNNER_TEMP/publisher-linux-x64.zip" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/publisher"
+          unzip -q "$RUNNER_TEMP/publisher-linux-x64.zip" -d "$RUNNER_TEMP/publisher"
+          chmod +x "$RUNNER_TEMP/publisher/publisher"
+
+      - name: Publicar no APIM DES
+        env:
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          AZURE_RESOURCE_GROUP_NAME: ${{ vars.AZURE_RESOURCE_GROUP_NAME }}
+          API_MANAGEMENT_SERVICE_NAME: ${{ vars.API_MANAGEMENT_SERVICE_NAME }}
+          API_MANAGEMENT_SERVICE_OUTPUT_FOLDER_PATH: ${{ github.workspace }}/apimartifacts
+          CONFIGURATION_YAML_PATH: ${{ github.workspace }}/configuration.des.yaml
+          PUBLISH_COMMIT_ID: ${{ (github.event_name == 'push' || github.event.inputs.mode == 'incremental') && github.sha || '' }}
+        run: |
+          set -euo pipefail
+          # COMMIT_ID limita a publicação ao commit; sem ele, publica todos os artefatos.
+          if [[ -n "$PUBLISH_COMMIT_ID" ]]; then
+            export COMMIT_ID="$PUBLISH_COMMIT_ID"
+          fi
+          "$RUNNER_TEMP/publisher/publisher"
+
+  publish-prd:
+    needs: publish-des
+    if: ${{ always() && ((github.event_name == 'push' && needs.publish-des.result == 'success') || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'prd')) }}
+    runs-on: ubuntu-latest
+    environment: prd
+    concurrency:
+      group: apim-publish-prd
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Login Azure por OIDC
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Gerar configuração PRD
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          AZURE_RESOURCE_GROUP_NAME: ${{ vars.AZURE_RESOURCE_GROUP_NAME }}
+          API_MANAGEMENT_SERVICE_NAME: ${{ vars.API_MANAGEMENT_SERVICE_NAME }}
+          BACKEND_PEDIDOS_URL: ${{ vars.BACKEND_PEDIDOS_URL }}
+        run: |
+          set -euo pipefail
+          # Falha cedo se faltar uma variável obrigatória do Environment.
+          for variable in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID AZURE_RESOURCE_GROUP_NAME API_MANAGEMENT_SERVICE_NAME BACKEND_PEDIDOS_URL; do
+            if [[ -z "${!variable:-}" ]]; then
+              echo "::error::A variável $variable é obrigatória no Environment prd."
+              exit 1
+            fi
+          done
+          # Garante que envsubst esteja disponível no runner.
+          if ! command -v envsubst >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y gettext-base
+          fi
+          # Renderiza somente os placeholders declarados no template.
+          envsubst '${API_MANAGEMENT_SERVICE_NAME} ${BACKEND_PEDIDOS_URL}' < configuration/configuration.template.yaml > configuration.prd.yaml
+
+      - name: Baixar Publisher APIOps v7.0.4
+        run: |
+          set -euo pipefail
+          # Baixa a release oficial e valida seu SHA-256 fixado.
+          curl --fail --location --silent --show-error \
+            https://github.com/Azure/apiops/releases/download/v7.0.4/publisher-linux-x64.zip \
+            --output "$RUNNER_TEMP/publisher-linux-x64.zip"
+          echo '2c1f32d18e8b66271df1dd184a3b45a0ff5cfe4149beb178f017a7db03a88fe0  '"$RUNNER_TEMP/publisher-linux-x64.zip" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/publisher"
+          unzip -q "$RUNNER_TEMP/publisher-linux-x64.zip" -d "$RUNNER_TEMP/publisher"
+          chmod +x "$RUNNER_TEMP/publisher/publisher"
+
+      - name: Publicar no APIM PRD
+        env:
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          AZURE_RESOURCE_GROUP_NAME: ${{ vars.AZURE_RESOURCE_GROUP_NAME }}
+          API_MANAGEMENT_SERVICE_NAME: ${{ vars.API_MANAGEMENT_SERVICE_NAME }}
+          API_MANAGEMENT_SERVICE_OUTPUT_FOLDER_PATH: ${{ github.workspace }}/apimartifacts
+          CONFIGURATION_YAML_PATH: ${{ github.workspace }}/configuration.prd.yaml
+          PUBLISH_COMMIT_ID: ${{ (github.event_name == 'push' || github.event.inputs.mode == 'incremental') && github.sha || '' }}
+        run: |
+          set -euo pipefail
+          # COMMIT_ID limita a publicação ao commit; sem ele, publica todos os artefatos.
+          if [[ -n "$PUBLISH_COMMIT_ID" ]]; then
+            export COMMIT_ID="$PUBLISH_COMMIT_ID"
+          fi
+          "$RUNNER_TEMP/publisher/publisher"
